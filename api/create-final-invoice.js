@@ -9,40 +9,75 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const {
-    caseId,
-    customerEmail,
-    customerName,
-    description,
-    priceHt
-  } = req.body;
-
   try {
-    // 1️⃣ Créer ou récupérer le client Stripe
+    const { caseId, customerName, customerEmail, items } = req.body;
+
+    if (!customerEmail || !Array.isArray(items)) {
+      return res.status(400).json({ error: "Invalid payload" });
+    }
+
+    // ✅ Nettoyage des lignes
+    const validItems = items
+      .map((item) => {
+        const raw = String(item.priceHt ?? "")
+          .replace(",", ".")      // virgule → point
+          .replace(/[^0-9.]/g, ""); // enlève €, espaces, etc.
+
+        const price = Number(raw);
+
+        if (!item.description || isNaN(price) || price <= 0) {
+          return null;
+        }
+
+        return {
+          description: item.description,
+          priceHt: price,
+        };
+      })
+      .filter(Boolean);
+
+    if (validItems.length === 0) {
+      return res.status(400).json({
+        error: "Aucune ligne de facturation valide",
+      });
+    }
+
+    // 1️⃣ Client Stripe
     const customer = await stripe.customers.create({
       email: customerEmail,
       name: customerName,
     });
 
-    // 2️⃣ Créer la facture Stripe
-    const invoiceItem = await stripe.invoiceItems.create({
-      customer: customer.id,
-      description,
-      amount: Math.round(priceHt * 100),
-      currency: "eur",
-    });
+    // 2️⃣ Lignes Stripe
+    let totalHt = 0;
 
+    for (const item of validItems) {
+      const amount = Math.round(item.priceHt * 100);
+      totalHt += item.priceHt;
+
+      await stripe.invoiceItems.create({
+        customer: customer.id,
+        description: item.description,
+        amount,
+        currency: "eur",
+      });
+    }
+
+    // 3️⃣ Facture Stripe
     const invoice = await stripe.invoices.create({
       customer: customer.id,
       collection_method: "send_invoice",
       days_until_due: 0,
       auto_advance: true,
+      pending_invoice_items_behavior: "include",
     });
 
-    // 3️⃣ Finaliser la facture
     const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id);
 
-    // 4️⃣ Envoyer le devis définitif par email
+    const tva = totalHt * 0.2;
+    const totalTtc = totalHt * 1.2;
+
+    // 4️⃣ Email devis définitif
     await resend.emails.send({
       from: "Serrurier Paris Express <devis@mail.parisunlockdoor.fr>",
       to: [customerEmail],
@@ -50,13 +85,22 @@ export default async function handler(req, res) {
       html: `
         <h2>Votre devis définitif</h2>
         <p>Bonjour ${customerName},</p>
-        <p>Suite à l’intervention, voici le devis définitif :</p>
+
         <ul>
-          <li>Description : ${description}</li>
-          <li>Prix HT : ${priceHt} €</li>
-          <li>TVA (20%) : ${(priceHt * 0.2).toFixed(2)} €</li>
-          <li><strong>Total TTC : ${(priceHt * 1.2).toFixed(2)} €</strong></li>
+          ${validItems
+            .map(
+              (i) =>
+                `<li>${i.description} — ${i.priceHt.toFixed(2)} € HT</li>`
+            )
+            .join("")}
         </ul>
+
+        <p>
+          <strong>Total HT :</strong> ${totalHt.toFixed(2)} €<br/>
+          <strong>TVA (20%) :</strong> ${tva.toFixed(2)} €<br/>
+          <strong>Total TTC :</strong> ${totalTtc.toFixed(2)} €
+        </p>
+
         <p>
           👉 <a href="${finalizedInvoice.hosted_invoice_url}">
           Payer en ligne en toute sécurité
@@ -71,6 +115,6 @@ export default async function handler(req, res) {
     });
   } catch (error) {
     console.error("Erreur création facture:", error);
-    return res.status(500).json({ error: "Invoice creation failed" });
+    return res.status(500).json({ error: error.message });
   }
 }
