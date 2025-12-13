@@ -4,6 +4,8 @@ import { Resend } from "resend";
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+const TVA_RATE = 0.20;
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -16,22 +18,22 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Invalid payload" });
     }
 
-    // ✅ Nettoyage des lignes
+    // 🔒 Nettoyage des lignes
     const validItems = items
       .map((item) => {
-        const raw = String(item.priceHt ?? "")
-          .replace(",", ".")      // virgule → point
-          .replace(/[^0-9.]/g, ""); // enlève €, espaces, etc.
+        const rawPrice = String(item.priceHt ?? "")
+          .replace(",", ".")
+          .replace(/[^0-9.]/g, "");
 
-        const price = Number(raw);
+        const priceHt = Number(rawPrice);
 
-        if (!item.description || isNaN(price) || price <= 0) {
+        if (!item.description || isNaN(priceHt) || priceHt <= 0) {
           return null;
         }
 
         return {
           description: item.description,
-          priceHt: price,
+          priceHt,
         };
       })
       .filter(Boolean);
@@ -42,26 +44,24 @@ export default async function handler(req, res) {
       });
     }
 
+    // 🧮 Calculs
+    const totalHt = validItems.reduce((sum, i) => sum + i.priceHt, 0);
+    const tva = totalHt * TVA_RATE;
+    const totalTtc = totalHt + tva;
+
     // 1️⃣ Client Stripe
     const customer = await stripe.customers.create({
       email: customerEmail,
       name: customerName,
     });
 
-    // 2️⃣ Lignes Stripe
-    let totalHt = 0;
-
-    for (const item of validItems) {
-      const amount = Math.round(item.priceHt * 100);
-      totalHt += item.priceHt;
-
-      await stripe.invoiceItems.create({
-        customer: customer.id,
-        description: item.description,
-        amount,
-        currency: "eur",
-      });
-    }
+    // 2️⃣ UNE seule ligne Stripe = TOTAL TTC
+    await stripe.invoiceItems.create({
+      customer: customer.id,
+      description: `Intervention serrurerie – Dossier ${caseId}`,
+      amount: Math.round(totalTtc * 100), // ✅ TTC envoyé à Stripe
+      currency: "eur",
+    });
 
     // 3️⃣ Facture Stripe
     const invoice = await stripe.invoices.create({
@@ -74,10 +74,7 @@ export default async function handler(req, res) {
 
     const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id);
 
-    const tva = totalHt * 0.2;
-    const totalTtc = totalHt * 1.2;
-
-    // 4️⃣ Email devis définitif
+    // 4️⃣ Email devis définitif (détail HT / TVA / TTC)
     await resend.emails.send({
       from: "Serrurier Paris Express <devis@mail.parisunlockdoor.fr>",
       to: [customerEmail],
@@ -97,14 +94,19 @@ export default async function handler(req, res) {
 
         <p>
           <strong>Total HT :</strong> ${totalHt.toFixed(2)} €<br/>
-          <strong>TVA (20%) :</strong> ${tva.toFixed(2)} €<br/>
+          <strong>TVA (20 %) :</strong> ${tva.toFixed(2)} €<br/>
           <strong>Total TTC :</strong> ${totalTtc.toFixed(2)} €
         </p>
 
         <p>
           👉 <a href="${finalizedInvoice.hosted_invoice_url}">
-          Payer en ligne en toute sécurité
+          Payer en ligne (${totalTtc.toFixed(2)} € TTC)
           </a>
+        </p>
+
+        <p>
+          Serrurier Paris Express<br/>
+          📞 06 49 65 85 10
         </p>
       `,
     });
@@ -112,6 +114,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       paymentUrl: finalizedInvoice.hosted_invoice_url,
+      totalTtc: totalTtc.toFixed(2),
     });
   } catch (error) {
     console.error("Erreur création facture:", error);
