@@ -2,6 +2,7 @@
   "name": "paris-unlock-backend",
   "private": true,
   "dependencies": {
+    "resend": "^3.0.0",
     "stripe": "^14.0.0"
   }
 }
