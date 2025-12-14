@@ -19,7 +19,7 @@ export default async function handler(req, res) {
 
   try {
     const result = await resend.emails.send({
-      from: "Serrurier Paris Express <devis@mail.parisunlockdoor.fr>",
+      from: "Serrurier Paris Express <contact@parisunlockdoor.fr>",
       to: ["contact@parisunlockdoor.fr"], // 🔁 destinataire de test
       subject: "TEST RESEND – Email de validation",
       html: `
