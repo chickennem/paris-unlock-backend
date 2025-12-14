@@ -86,7 +86,7 @@ export default async function handler(req, res) {
 
     // 4️⃣ Email devis définitif
     await resend.emails.send({
-      from: "Serrurier Paris Express <devis@mail.parisunlockdoor.fr>",
+      from: "Serrurier Paris Express <contact@parisunlockdoor.fr>",
       to: [customerEmail],
       subject: `Devis définitif – Serrurier Paris Express (${caseId})`,
       html: `
