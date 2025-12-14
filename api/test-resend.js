@@ -3,55 +3,36 @@ import { Resend } from "resend";
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 export default async function handler(req, res) {
-  // 🔓 CORS (pour tests navigateur si besoin)
+  // CORS (optionnel)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  // Preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "GET") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const result = await resend.emails.send({
+    const response = await resend.emails.send({
+      // ⚠️ Mets un FROM qui correspond à un domaine VERIFIED dans Resend
       from: "Serrurier Paris Express <contact@parisunlockdoor.fr>",
-      to: ["contact@parisunlockdoor.fr"], // 🔁 destinataire de test
-      subject: "TEST RESEND – Email de validation",
-      html: `
-        <h2>Test Resend OK</h2>
-        <p>Si tu reçois cet email, alors :</p>
-        <ul>
-          <li>✅ Resend fonctionne</li>
-          <li>✅ Le domaine est validé</li>
-          <li>✅ OVH reçoit les emails</li>
-        </ul>
-
-        <p>
-          Date : ${new Date().toLocaleString("fr-FR")}
-        </p>
-
-        <p>
-          —<br/>
-          Serrurier Paris Express<br/>
-          06 49 65 85 10
-        </p>
-      `,
+      to: ["contact@parisunlockdoor.fr"],
+      subject: "TEST RESEND DEBUG",
+      html: "<p>Test Resend debug</p>",
     });
 
+    // Resend SDK retourne souvent { data, error }
     return res.status(200).json({
-      success: true,
-      resendId: result.id || null,
+      ok: true,
+      response,
+      resendId: response?.data?.id ?? response?.id ?? null,
+      resendError: response?.error ?? null,
     });
-  } catch (error) {
-    console.error("test-resend error:", error);
+  } catch (e) {
+    console.error("RESEND THROW:", e);
     return res.status(500).json({
-      success: false,
-      error: error.message,
+      ok: false,
+      message: e?.message || "Unknown error",
+      name: e?.name,
+      stack: e?.stack,
     });
   }
 }
