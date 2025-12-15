@@ -2,18 +2,24 @@ import Stripe from "stripe";
 
 export const config = {
   api: {
-    bodyParser: false,
+    bodyParser: false, // 🔥 OBLIGATOIRE
   },
 };
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-async function buffer(readable) {
-  const chunks = [];
-  for await (const chunk of readable) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
-  return Buffer.concat(chunks);
+/**
+ * Lire le body brut EXACT
+ */
+async function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = Buffer.from([]);
+    req.on("data", (chunk) => {
+      data = Buffer.concat([data, chunk]);
+    });
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
 }
 
 export default async function handler(req, res) {
@@ -21,15 +27,15 @@ export default async function handler(req, res) {
     return res.status(405).send("Method Not Allowed");
   }
 
-  const sig = req.headers["stripe-signature"];
-  const buf = await buffer(req);
-
   let event;
 
   try {
+    const rawBody = await getRawBody(req);
+    const signature = req.headers["stripe-signature"];
+
     event = stripe.webhooks.constructEvent(
-      buf,
-      sig,
+      rawBody,
+      signature,
       process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
@@ -37,28 +43,19 @@ export default async function handler(req, res) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  // ✅ EVENT VALIDE À 100 %
   try {
-    // ✅ Paiement confirmé
     if (event.type === "invoice.paid") {
       const invoice = event.data.object;
-
       const caseId = invoice.metadata?.caseId;
 
-      if (!caseId) {
-        console.error("❌ Missing caseId in invoice metadata");
-        return res.status(200).json({ received: true });
-      }
-
-      console.log("✅ invoice.paid received", {
+      console.log("✅ invoice.paid verified", {
         caseId,
         invoiceId: invoice.id,
-        eventId: event.id,
       });
 
-      // 🔥 Appel Lovable pour update le statut
-      const response = await fetch(
-        "https://parisunlockdoor.lovable.app/api/payment-update",
-        {
+      if (caseId) {
+        await fetch("https://parisunlockdoor.lovable.app/api/payment-update", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -69,14 +66,7 @@ export default async function handler(req, res) {
             invoiceId: invoice.id,
             eventId: event.id,
           }),
-        }
-      );
-
-      if (!response.ok) {
-        const text = await response.text();
-        console.error("❌ Lovable error:", text);
-      } else {
-        console.log("✅ Lovable status updated");
+        });
       }
     }
 
