@@ -49,7 +49,7 @@ export default async function handler(req, res) {
     try {
       // 📧 EMAIL CLIENT
       await resend.emails.send({
-        from: "Serrurier Paris Express <contact@parisunlockdoor.fr>",
+        from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
         to: [customerEmail],
         subject: "Paiement confirmé — Serrurier Paris Express",
         html: `
@@ -76,7 +76,7 @@ export default async function handler(req, res) {
 
       // 📧 EMAIL INTERNE
       await resend.emails.send({
-        from: "Serrurier Paris Express <contact@parisunlockdoor.fr>",
+        from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
         to: ["contact@parisunlockdoor.fr"],
         subject: "Facture payée — Client",
         html: `
