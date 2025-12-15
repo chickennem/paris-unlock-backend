@@ -13,7 +13,7 @@ export default async function handler(req, res) {
   try {
     const response = await resend.emails.send({
       // ⚠️ Mets un FROM qui correspond à un domaine VERIFIED dans Resend
-      from: "Serrurier Paris Express <contact@parisunlockdoor.fr>",
+      from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
       to: ["contact@parisunlockdoor.fr"],
       subject: "TEST RESEND DEBUG",
       html: "<p>Test Resend debug</p>",
