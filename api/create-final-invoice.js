@@ -4,7 +4,7 @@ import { Resend } from "resend";
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const TVA_RATE = 0.20;
+const TVA_RATE = 0.2;
 
 export default async function handler(req, res) {
   // 🔓 CORS
@@ -12,7 +12,6 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // Preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -24,11 +23,11 @@ export default async function handler(req, res) {
   try {
     const { caseId, customerName, customerEmail, items } = req.body;
 
-    if (!customerEmail || !Array.isArray(items)) {
+    if (!caseId || !customerEmail || !Array.isArray(items)) {
       return res.status(400).json({ error: "Invalid payload" });
     }
 
-    // 🔒 Nettoyage & validation lignes
+    // 🔒 Nettoyage & validation des lignes
     const validItems = items
       .map((item) => {
         const raw = String(item.priceHt ?? "")
@@ -59,21 +58,21 @@ export default async function handler(req, res) {
     const tva = totalHt * TVA_RATE;
     const totalTtc = totalHt + tva;
 
-    // 1️⃣ Client Stripe
+    // 1️⃣ Création client Stripe
     const customer = await stripe.customers.create({
       email: customerEmail,
-      name: customerName,
+      name: customerName || "Client",
     });
 
-    // 2️⃣ UNE ligne Stripe = TOTAL TTC
+    // 2️⃣ Une seule ligne Stripe = TOTAL TTC
     await stripe.invoiceItems.create({
       customer: customer.id,
       description: `Intervention serrurerie – Dossier ${caseId}`,
-      amount: Math.round(totalTtc * 100), // ✅ TTC
+      amount: Math.round(totalTtc * 100), // TTC en centimes
       currency: "eur",
     });
 
-    // 3️⃣ Facture Stripe
+    // 3️⃣ Création + finalisation facture Stripe
     const invoice = await stripe.invoices.create({
       customer: customer.id,
       collection_method: "send_invoice",
@@ -84,14 +83,18 @@ export default async function handler(req, res) {
 
     const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id);
 
-    // 4️⃣ Email devis définitif
+    // 4️⃣ Email devis définitif (CLIENT + INTERNE)
     await resend.emails.send({
-      from: "Serrurier Paris Express <contact@parisunlockdoor.fr>",
-      to: [customerEmail],
+      from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
+      reply_to: "contact@parisunlockdoor.fr",
+      to: [
+        customerEmail,
+        "contact@parisunlockdoor.fr",
+      ],
       subject: `Devis définitif – Serrurier Paris Express (${caseId})`,
       html: `
         <h2>Votre devis définitif</h2>
-        <p>Bonjour ${customerName},</p>
+        <p>Bonjour ${customerName || ""},</p>
 
         <ul>
           ${validItems
@@ -124,10 +127,15 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       paymentUrl: finalizedInvoice.hosted_invoice_url,
+      totalHt: totalHt.toFixed(2),
+      tva: tva.toFixed(2),
       totalTtc: totalTtc.toFixed(2),
     });
   } catch (error) {
     console.error("create-final-invoice error:", error);
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({
+      error: "Erreur création devis/facture",
+      details: error.message,
+    });
   }
 }
