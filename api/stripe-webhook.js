@@ -1,133 +1,140 @@
 import Stripe from "stripe";
 import { Resend } from "resend";
 
-export const config = {
-  api: {
-    bodyParser: false, // 🔥 OBLIGATOIRE POUR STRIPE
-  },
-};
-
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-/**
- * Lire le body brut EXACT (signature Stripe)
- */
-function getRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = Buffer.alloc(0);
-    req.on("data", (chunk) => {
-      data = Buffer.concat([data, chunk]);
-    });
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
-  });
-}
+const TVA_RATE = 0.20;
 
 export default async function handler(req, res) {
+  // 🔓 CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  let event;
-
   try {
-    const rawBody = await getRawBody(req);
-    const signature = req.headers["stripe-signature"];
+    const {
+      caseId,
+      customerName,
+      customerEmail,
+      items, // [{ description, priceHt }]
+    } = req.body;
 
-    if (!signature) {
-      console.error("❌ Missing stripe-signature header");
-      return res.status(400).send("Missing Stripe signature");
+    if (!caseId || !customerEmail || !Array.isArray(items)) {
+      return res.status(400).json({ error: "Invalid payload" });
     }
 
-    event = stripe.webhooks.constructEvent(
-      rawBody,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    // 🔎 Nettoyage & validation des lignes
+    const validItems = items
+      .map((item) => {
+        const raw = String(item.priceHt ?? "")
+          .replace(",", ".")
+          .replace(/[^0-9.]/g, "");
 
-    console.log("✅ Stripe signature verified:", event.type);
-  } catch (err) {
-    console.error("❌ Stripe signature error:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
+        const priceHt = Number(raw);
 
-  try {
-    // 🎯 PAIEMENT CONFIRMÉ
-    if (event.type === "invoice.paid") {
-      const invoice = event.data.object;
-
-      const caseId = invoice.metadata?.caseId;
-      const customerEmail =
-        invoice.customer_email ||
-        invoice.customer_details?.email;
-
-      console.log("💰 invoice.paid received", {
-        caseId,
-        invoiceId: invoice.id,
-        customerEmail,
-      });
-
-      // Sécurité minimale
-      if (!caseId || !customerEmail) {
-        console.error("❌ Missing caseId or customerEmail");
-        return res.status(200).json({ received: true });
-      }
-
-      // 1️⃣ EMAIL CLIENT + INTERNE
-      const emailResult = await resend.emails.send({
-        from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
-        reply_to: "contact@parisunlockdoor.fr",
-        to: [customerEmail, "contact@parisunlockdoor.fr"],
-        subject: `Paiement confirmé – Serrurier Paris Express (${caseId})`,
-        html: `
-          <h2>Paiement confirmé ✅</h2>
-
-          <p>
-            Nous confirmons la bonne réception de votre paiement
-            pour l’intervention <strong>${caseId}</strong>.
-          </p>
-
-          <p>
-            👉 <a href="${invoice.hosted_invoice_url}">
-              Voir la facture
-            </a>
-          </p>
-
-          <p>
-            Merci pour votre confiance.<br/>
-            <strong>Serrurier Paris Express</strong><br/>
-            📞 06 49 65 85 10
-          </p>
-        `,
-      });
-
-      console.log("📧 Resend result:", emailResult);
-
-      // 2️⃣ UPDATE STATUT DANS LOVABLE
-      const lovableResponse = await fetch(
-        "https://parisunlockdoor.lovable.app/api/payment-update",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.PAYMENT_UPDATE_SECRET}`,
-          },
-          body: JSON.stringify({
-            caseId,
-            invoiceId: invoice.id,
-            eventId: event.id,
-          }),
+        if (!item.description || isNaN(priceHt) || priceHt <= 0) {
+          return null;
         }
-      );
 
-      const lovableText = await lovableResponse.text();
-      console.log("🔁 Lovable response:", lovableResponse.status, lovableText);
+        return {
+          description: item.description,
+          priceHt,
+        };
+      })
+      .filter(Boolean);
+
+    if (validItems.length === 0) {
+      return res.status(400).json({ error: "Aucune ligne valide" });
     }
 
-    return res.status(200).json({ received: true });
+    // 🧮 Calculs
+    const totalHt = validItems.reduce((sum, i) => sum + i.priceHt, 0);
+    const tva = totalHt * TVA_RATE;
+    const totalTtc = totalHt + tva;
+
+    // 1️⃣ Client Stripe
+    const customer = await stripe.customers.create({
+      email: customerEmail,
+      name: customerName || "Client",
+    });
+
+    // 2️⃣ UNE seule ligne TTC (logique simple & fiable)
+    await stripe.invoiceItems.create({
+      customer: customer.id,
+      amount: Math.round(totalTtc * 100), // ✅ TTC
+      currency: "eur",
+      description: `Intervention serrurerie – Dossier ${caseId}`,
+      metadata: {
+        caseId: caseId, // 🔥 IMPORTANT
+      },
+    });
+
+    // 3️⃣ Facture Stripe AVEC METADATA
+    const invoice = await stripe.invoices.create({
+      customer: customer.id,
+      collection_method: "send_invoice",
+      days_until_due: 0,
+      auto_advance: true,
+      pending_invoice_items_behavior: "include",
+      metadata: {
+        caseId: caseId, // 🔥 C’EST ÇA QUI MANQUAIT
+      },
+    });
+
+    const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id);
+
+    // 4️⃣ Email devis définitif + lien de paiement
+    await resend.emails.send({
+      from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
+      reply_to: "contact@parisunlockdoor.fr",
+      to: [customerEmail, "contact@parisunlockdoor.fr"],
+      subject: `Devis définitif – Serrurier Paris Express (${caseId})`,
+      html: `
+        <h2>Votre devis définitif</h2>
+
+        <p>Bonjour ${customerName || ""},</p>
+
+        <ul>
+          ${validItems
+            .map(
+              (i) =>
+                `<li>${i.description} — ${i.priceHt.toFixed(2)} € HT</li>`
+            )
+            .join("")}
+        </ul>
+
+        <p>
+          <strong>Total HT :</strong> ${totalHt.toFixed(2)} €<br/>
+          <strong>TVA (20%) :</strong> ${tva.toFixed(2)} €<br/>
+          <strong>Total TTC :</strong> ${totalTtc.toFixed(2)} €
+        </p>
+
+        <p>
+          👉 <a href="${finalizedInvoice.hosted_invoice_url}">
+            Payer en ligne (${totalTtc.toFixed(2)} € TTC)
+          </a>
+        </p>
+
+        <p>
+          Serrurier Paris Express<br/>
+          📞 06 49 65 85 10
+        </p>
+      `,
+    });
+
+    return res.status(200).json({
+      success: true,
+      paymentUrl: finalizedInvoice.hosted_invoice_url,
+      totalTtc: totalTtc.toFixed(2),
+    });
   } catch (error) {
-    console.error("❌ Webhook processing error:", error);
-    return res.status(500).json({ error: "Webhook failed" });
+    console.error("create-final-invoice error:", error);
+    return res.status(500).json({ error: error.message });
   }
 }
