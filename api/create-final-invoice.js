@@ -133,7 +133,7 @@ export default async function handler(req, res) {
     await resend.emails.send({
       from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
       to: ["contact@parisunlockdoor.fr"],
-      subject: `DEVIS DÉFINITIF ENVOYÉ – ${caseId}`,
+      subject: `Paiement confirmé – ${caseId}`,
       html: `
         <h3>Devis définitif envoyé</h3>
         <ul>
