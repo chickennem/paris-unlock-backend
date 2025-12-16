@@ -117,6 +117,11 @@ export default async function handler(req, res) {
               <p>
                 L’intervention est désormais <strong>terminée</strong>.
               </p>
+              <p>
+                 👉 <a href="${invoice.hosted_invoice_url}">
+                    Voir la facture en ligne
+                   </a>
+              </p>
 
               <p>
                 Merci pour votre confiance.<br/>
