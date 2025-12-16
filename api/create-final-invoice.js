@@ -142,6 +142,8 @@ export default async function handler(req, res) {
           <li>Email : ${customerEmail}</li>
           <li>Total TTC : ${totalTtc.toFixed(2)} €</li>
         </ul>
+        
+          👉 <a href="${finalizedInvoice.hosted_invoice_url}">
       `,
     });
 
