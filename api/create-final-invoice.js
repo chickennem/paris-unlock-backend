@@ -12,7 +12,10 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -22,27 +25,23 @@ export default async function handler(req, res) {
       caseId,
       customerName,
       customerEmail,
-      items // [{ description, priceHt }]
+      items, // [{ description, priceHt }]
     } = req.body;
 
+    // 🔎 VALIDATIONS
     if (!caseId || !customerEmail || !Array.isArray(items)) {
       return res.status(400).json({ error: "Invalid payload" });
     }
 
-    /* ─────────────────────────────
-       1️⃣ Nettoyage & validation
-    ───────────────────────────── */
-
     const validItems = items
       .map((item) => {
-        const raw = String(item.priceHt ?? "")
-          .replace(",", ".")
-          .replace(/[^0-9.]/g, "");
-        const priceHt = Number(raw);
+        const priceHt = Number(
+          String(item.priceHt ?? "")
+            .replace(",", ".")
+            .replace(/[^0-9.]/g, "")
+        );
 
-        if (!item.description || isNaN(priceHt) || priceHt <= 0) {
-          return null;
-        }
+        if (!item.description || isNaN(priceHt) || priceHt <= 0) return null;
 
         return {
           description: item.description,
@@ -52,64 +51,52 @@ export default async function handler(req, res) {
       .filter(Boolean);
 
     if (validItems.length === 0) {
-      return res.status(400).json({ error: "Aucune ligne valide" });
+      return res.status(400).json({ error: "No valid items" });
     }
 
-    /* ─────────────────────────────
-       2️⃣ Calculs HT / TVA / TTC
-    ───────────────────────────── */
-
+    // 🧮 CALCULS
     const totalHt = validItems.reduce((sum, i) => sum + i.priceHt, 0);
     const tva = totalHt * TVA_RATE;
     const totalTtc = totalHt + tva;
 
-    /* ─────────────────────────────
-       3️⃣ Client Stripe
-    ───────────────────────────── */
-
+    // 👤 CLIENT STRIPE
     const customer = await stripe.customers.create({
       email: customerEmail,
-      name: customerName || "Client",
+      name: customerName,
+      metadata: {
+        caseId,
+      },
     });
 
-    /* ─────────────────────────────
-       4️⃣ Ligne de facture (TTC)
-    ───────────────────────────── */
-
+    // 🧾 LIGNE DE FACTURE (TTC)
     await stripe.invoiceItems.create({
       customer: customer.id,
       description: `Intervention serrurerie – Dossier ${caseId}`,
-      amount: Math.round(totalTtc * 100), // TTC en centimes
+      amount: Math.round(totalTtc * 100),
       currency: "eur",
     });
 
-    /* ─────────────────────────────
-       5️⃣ Création facture Stripe
-       (case_id en metadata)
-    ───────────────────────────── */
-
+    // 📄 FACTURE STRIPE (METADATA CRITIQUE)
     const invoice = await stripe.invoices.create({
       customer: customer.id,
       collection_method: "send_invoice",
       days_until_due: 0,
       auto_advance: true,
       pending_invoice_items_behavior: "include",
+
       metadata: {
-        case_id: caseId, // 🔑 lien Lovable ↔ Stripe
+        caseId, // 🔥 INDISPENSABLE POUR LE WEBHOOK
+        type: "DEVIS_DEFINITIF",
       },
     });
 
     const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id);
 
-    /* ─────────────────────────────
-       6️⃣ Email devis définitif
-    ───────────────────────────── */
-
+    // 📧 EMAIL CLIENT
     await resend.emails.send({
       from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
-      reply_to: "contact@parisunlockdoor.fr",
-      to: [customerEmail, "contact@parisunlockdoor.fr"],
-      subject: `Devis définitif – Serrurier Paris Express (${caseId})`,
+      to: [customerEmail],
+      subject: `Devis définitif – ${caseId}`,
       html: `
         <h2>Devis définitif</h2>
         <p>Bonjour ${customerName || ""},</p>
@@ -136,32 +123,36 @@ export default async function handler(req, res) {
         </p>
 
         <p>
-          Après paiement, votre intervention sera marquée comme terminée.
-        </p>
-
-        <p>
           Serrurier Paris Express<br/>
           📞 06 49 65 85 10
         </p>
       `,
     });
 
-    /* ─────────────────────────────
-       7️⃣ Réponse API
-    ───────────────────────────── */
+    // 📧 EMAIL INTERNE
+    await resend.emails.send({
+      from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
+      to: ["contact@parisunlockdoor.fr"],
+      subject: `DEVIS DÉFINITIF ENVOYÉ – ${caseId}`,
+      html: `
+        <h3>Devis définitif envoyé</h3>
+        <ul>
+          <li>Dossier : ${caseId}</li>
+          <li>Client : ${customerName}</li>
+          <li>Email : ${customerEmail}</li>
+          <li>Total TTC : ${totalTtc.toFixed(2)} €</li>
+        </ul>
+      `,
+    });
 
     return res.status(200).json({
       success: true,
-      caseId,
       invoiceId: finalizedInvoice.id,
       paymentUrl: finalizedInvoice.hosted_invoice_url,
       totalTtc: totalTtc.toFixed(2),
     });
   } catch (error) {
-    console.error("create-final-invoice error:", error);
-    return res.status(500).json({
-      error: "Erreur création devis/facture",
-      details: error.message,
-    });
+    console.error("❌ create-final-invoice error:", error);
+    return res.status(500).json({ error: error.message });
   }
 }
