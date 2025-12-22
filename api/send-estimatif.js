@@ -1,12 +1,6 @@
 import { Resend } from "resend";
-import { createClient } from "@supabase/supabase-js";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
 
 export default async function handler(req, res) {
   // 🔓 CORS
@@ -29,58 +23,39 @@ export default async function handler(req, res) {
       customerEmail,
       customerPhone,
       address,
-      service,
       selectedOptions,
       estimatedTotal,
     } = req.body;
 
-    // 🔎 Validations
+    // ✅ VALIDATIONS
     if (!caseId || !customerEmail) {
-      return res.status(400).json({ error: "Missing required fields" });
+      return res.status(400).json({ error: "Missing caseId or customerEmail" });
     }
 
-    if (
-      !Array.isArray(selectedOptions) ||
-      selectedOptions.length === 0 ||
-      typeof estimatedTotal !== "number"
-    ) {
-      return res.status(400).json({
-        error: "Invalid estimation data",
-      });
+    if (!Array.isArray(selectedOptions) || selectedOptions.length === 0) {
+      return res.status(400).json({ error: "No options selected" });
     }
 
-    // 🗄️ Sauvegarde DB
-    const { error: insertError } = await supabase.from("cases").insert({
-      case_id: caseId,
-      customer_name: customerName,
-      customer_email: customerEmail,
-      customer_phone: customerPhone,
-      address,
-      service,
-      selected_options: selectedOptions,
-      estimated_total: estimatedTotal,
-      status: "DEVIS_ESTIMATIF_ENVOYE",
-    });
-
-    if (insertError) {
-      console.error("DB insert error:", insertError);
-      return res.status(500).json({ error: "Database error" });
+    if (typeof estimatedTotal !== "number") {
+      return res.status(400).json({ error: "Invalid estimatedTotal" });
     }
 
     // 🧾 HTML options
     const optionsHtml = selectedOptions
       .map(
-        (o) => `<li>${o.label} — <strong>${o.price} €</strong></li>`
+        (o) =>
+          `<li>${o.label} — <strong>${Number(o.price).toFixed(2)} €</strong></li>`
       )
       .join("");
 
-    // 📧 Email client
+    // 📧 EMAIL CLIENT
     await resend.emails.send({
       from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
-      to: [customerEmail],
+      to: customerEmail,
       subject: `Devis estimatif – Serrurier Paris Express (${caseId})`,
       html: `
         <h2>Votre devis estimatif</h2>
+
         <p>Bonjour ${customerName || ""},</p>
 
         <p><strong>Adresse :</strong> ${address}</p>
@@ -88,29 +63,32 @@ export default async function handler(req, res) {
         <h3>Détail de votre estimation</h3>
         <ul>${optionsHtml}</ul>
 
-        <p>
+        <p style="font-size:18px">
           <strong>Total estimatif HT : ${estimatedTotal.toFixed(2)} €</strong>
         </p>
 
         <p style="font-size:12px;color:#666">
-          Prix estimatif. Le devis définitif sera confirmé après diagnostic sur place.
+          Ce prix est indicatif.  
+          Le devis définitif sera établi après diagnostic sur place par notre artisan.
         </p>
 
         <p>
-          📞 06 49 65 85 10<br/>
+          📞 <strong>06 49 65 85 10</strong><br/>
           Serrurier Paris Express
         </p>
       `,
     });
 
-    // 📧 Email interne
+    // 📧 EMAIL INTERNE
     await resend.emails.send({
       from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
-      to: ["contact@parisunlockdoor.fr"],
-      subject: `NOUVELLE DEMANDE – ${service} (${caseId})`,
+      to: "contact@parisunlockdoor.fr",
+      subject: `NOUVELLE DEMANDE – ${caseId}`,
       html: `
         <h3>Nouvelle demande reçue</h3>
+
         <ul>
+          <li><strong>Dossier :</strong> ${caseId}</li>
           <li><strong>Client :</strong> ${customerName}</li>
           <li><strong>Email :</strong> ${customerEmail}</li>
           <li><strong>Téléphone :</strong> ${customerPhone}</li>
@@ -120,13 +98,15 @@ export default async function handler(req, res) {
         <h4>Options sélectionnées</h4>
         <ul>${optionsHtml}</ul>
 
-        <p><strong>Total estimatif HT : ${estimatedTotal.toFixed(2)} €</strong></p>
+        <p>
+          <strong>Total estimatif HT : ${estimatedTotal.toFixed(2)} €</strong>
+        </p>
       `,
     });
 
     return res.status(200).json({ success: true });
   } catch (error) {
-    console.error("send-estimatif error:", error);
-    return res.status(500).json({ error: error.message });
+    console.error("[send-estimatif]", error);
+    return res.status(500).json({ error: "Failed to send estimatif email" });
   }
 }
