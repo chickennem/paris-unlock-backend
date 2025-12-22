@@ -12,7 +12,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 
 // 🔒 URL Lovable HARD-CODÉE (FIX DÉFINITIF)
 const PAYMENT_UPDATE_URL =
-  "https://parisunlockdoor.lovable.app/functions/v1/payment-update";
+  "https://emtyirxwxhzobxomfjuk.supabase.co/functions/v1/payment-update";
 
 async function buffer(readable) {
   const chunks = [];
