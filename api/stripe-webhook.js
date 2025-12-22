@@ -52,7 +52,7 @@ export default async function handler(req, res) {
   // =================================================
   // 🎯 FACTURE PAYÉE
   // =================================================
-  if (event.type === "invoice.payment_succeeded") {
+  if (event.type === "invoice.payment_succeeded" || event.type === "invoice.paid") {
     const invoice = event.data.object;
 
     const caseId = invoice.metadata?.caseId;
