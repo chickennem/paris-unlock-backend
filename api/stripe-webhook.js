@@ -3,14 +3,17 @@ import { Resend } from "resend";
 
 export const config = {
   api: {
-    bodyParser: false, // ⚠️ OBLIGATOIRE pour Stripe
+    bodyParser: false,
   },
 };
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// 🔧 utilitaire pour récupérer le RAW BODY
+// 🔒 URL Lovable HARD-CODÉE (FIX DÉFINITIF)
+const PAYMENT_UPDATE_URL =
+  "https://parisunlockdoor.lovable.app/functions/v1/payment-update";
+
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) chunks.push(chunk);
@@ -22,138 +25,85 @@ export default async function handler(req, res) {
     return res.status(405).send("Method Not Allowed");
   }
 
+  const sig = req.headers["stripe-signature"];
+  const buf = await buffer(req);
+
   let event;
-
   try {
-    const sig = req.headers["stripe-signature"];
-    const buf = await buffer(req);
-
     event = stripe.webhooks.constructEvent(
       buf,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
-
-    console.log("✅ Stripe signature verified:", event.type);
   } catch (err) {
     console.error("❌ Stripe signature error:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  console.log("✅ Stripe event received:", event.type);
+
   // 🎯 Paiement confirmé
-  if (
-    event.type === "invoice.paid" ||
-    event.type === "invoice.payment_succeeded"
-  ) {
+  if (event.type === "invoice.paid") {
     const invoice = event.data.object;
 
     const caseId = invoice.metadata?.caseId;
     const customerEmail = invoice.customer_email;
-    const hostedInvoiceUrl = invoice.hosted_invoice_url;
-    const invoicePdf = invoice.invoice_pdf;
-    const amountTtc = (invoice.amount_paid / 100).toFixed(2);
+    const invoiceId = invoice.id;
 
-    console.log("💰 Paiement reçu", {
+    console.log("💰 invoice.paid received", {
       caseId,
-      invoiceId: invoice.id,
+      invoiceId,
       customerEmail,
     });
 
-    if (!caseId || !customerEmail) {
-      console.warn("⚠️ Missing caseId or customerEmail");
+    if (!caseId) {
+      console.warn("⚠️ Missing caseId in invoice metadata");
       return res.json({ received: true });
     }
 
-    /* ----------------------------------------------------
-       1️⃣ UPDATE STATUT → TERMINE (Lovable)
-    ---------------------------------------------------- */
     try {
-      await fetch(
-        "https://parisunlockdoor.lovable.app/~api/payment-update",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.PAYMENT_UPDATE_SECRET}`,
-          },
-          body: JSON.stringify({
-            caseId,
-            status: "TERMINE",
-            invoiceId: invoice.id,
-          }),
-        }
-      );
-
-      console.log("✅ Statut mis à jour → TERMINE");
-    } catch (err) {
-      console.error("❌ Erreur update statut Lovable", err);
-    }
-
-    /* ----------------------------------------------------
-       2️⃣ EMAIL CLIENT – Paiement confirmé
-    ---------------------------------------------------- */
-    try {
-      await resend.emails.send({
-        from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
-        to: [customerEmail],
-        subject: "Paiement confirmé – Serrurier Paris Express",
-        html: `
-          <h2>Paiement confirmé ✅</h2>
-          <p>Merci pour votre règlement.</p>
-
-          <p><strong>Dossier :</strong> ${caseId}</p>
-          <p><strong>Montant payé :</strong> ${amountTtc} € TTC</p>
-
-          <p>
-            👉 <a href="${hostedInvoiceUrl}">Voir la facture en ligne</a>
-          </p>
-
-          <p>
-            Serrurier Paris Express<br/>
-            📞 06 49 65 85 10
-          </p>
-        `,
-        attachments: invoicePdf
-          ? [
-              {
-                filename: "facture.pdf",
-                path: invoicePdf,
-              },
-            ]
-          : [],
+      // 🔁 UPDATE STATUT DANS LOVABLE
+      const response = await fetch(PAYMENT_UPDATE_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.PAYMENT_UPDATE_SECRET}`,
+        },
+        body: JSON.stringify({
+          caseId,
+          invoiceId,
+        }),
       });
 
-      console.log("📧 Email client envoyé");
-    } catch (err) {
-      console.error("❌ Erreur email client", err);
-    }
+      const text = await response.text();
+      console.log("🔁 Lovable response:", response.status, text);
 
-    /* ----------------------------------------------------
-       3️⃣ EMAIL INTERNE
-    ---------------------------------------------------- */
-    try {
-      await resend.emails.send({
-        from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
-        to: ["contact@parisunlockdoor.fr"],
-        subject: `FACTURE PAYÉE – ${caseId}`,
-        html: `
-          <h3>Paiement confirmé</h3>
-          <ul>
-            <li>Dossier : ${caseId}</li>
-            <li>Email client : ${customerEmail}</li>
-            <li>Montant TTC : ${amountTtc} €</li>
-          </ul>
-          <p>
-            <a href="${hostedInvoiceUrl}">Voir facture Stripe</a>
-          </p>
-        `,
-      });
-
-      console.log("📧 Email interne envoyé");
+      // 📧 EMAIL CONFIRMATION PAIEMENT
+      if (customerEmail) {
+        await resend.emails.send({
+          from: "Serrurier Paris Express <contact@mail.parisunlockdoor.fr>",
+          to: [customerEmail],
+          subject: "Paiement confirmé – Serrurier Paris Express",
+          html: `
+            <h2>Paiement confirmé ✅</h2>
+            <p>Merci pour votre règlement.</p>
+            <p><strong>Montant payé :</strong> ${(invoice.amount_paid / 100).toFixed(2)} €</p>
+            <p>
+              <a href="${invoice.hosted_invoice_url}">
+                👉 Voir votre facture
+              </a>
+            </p>
+            <p>
+              Serrurier Paris Express<br/>
+              📞 06 49 65 85 10
+            </p>
+          `,
+        });
+      }
     } catch (err) {
-      console.error("❌ Erreur email interne", err);
+      console.error("❌ Error processing invoice.paid:", err);
     }
   }
 
-  return res.json({ received: true });
+  res.json({ received: true });
 }
